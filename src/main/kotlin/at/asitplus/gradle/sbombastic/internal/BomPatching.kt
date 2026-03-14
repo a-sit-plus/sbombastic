@@ -3,15 +3,10 @@ package at.asitplus.gradle.sbombastic.internal
 import at.asitplus.gradle.sbombastic.licenseId
 import at.asitplus.gradle.sbombastic.licenseName
 import at.asitplus.gradle.sbombastic.licenseUrl
-import org.cyclonedx.model.Bom
-import org.cyclonedx.model.Component
-import org.cyclonedx.model.Dependency
-import org.cyclonedx.model.License
-import org.cyclonedx.model.LicenseChoice
-import org.cyclonedx.model.Metadata
-import org.cyclonedx.model.OrganizationalContact
-import org.cyclonedx.model.OrganizationalEntity
+import org.cyclonedx.model.*
 import org.gradle.api.Project
+import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
+import java.net.URLEncoder
 
 internal fun SupplierInfo.toOrganizationalEntity(): OrganizationalEntity =
     OrganizationalEntity().apply {
@@ -34,11 +29,18 @@ internal fun Bom.normalizeBom(
     refRewrites: MutableMap<String, String>,
     supplierInfo: SupplierInfo?,
     thirdPartySupplierMappings: List<SupplierMapping>,
+    jsNpmGraph: JsResolvedNpmGraph?,
 ): Bom {
     metadata?.component?.rewriteComponent(normalizationPlan, refRewrites)
     components?.forEach { component -> component.rewriteComponent(normalizationPlan, refRewrites) }
     dependencies = dependencies?.map { it.rewrittenDependency(refRewrites) }?.toMutableList()
+
     alignRootDependenciesToPublicationPom(publicationCoordinates)
+
+    if (jsNpmGraph != null) {
+        patchResolvedNpmGraph(jsNpmGraph)
+    }
+
     patchSupplierMetadata(supplierInfo, thirdPartySupplierMappings)
 
     project.licenseId?.let {
@@ -117,8 +119,10 @@ private fun Bom.patchSupplierMetadata(
                     component.supplier = firstPartySupplier
                 }
             }
+
             else -> {
-                val thirdPartySupplier = thirdPartySupplierMappings.findSupplierForGroup(group)?.toOrganizationalEntity()
+                val thirdPartySupplier =
+                    thirdPartySupplierMappings.findSupplierForGroup(group)?.toOrganizationalEntity()
                 if (thirdPartySupplier != null) {
                     component.supplier = thirdPartySupplier
                 }
@@ -221,7 +225,9 @@ private fun withPurlType(purl: String, artifactType: String): String {
         .filter { it.isNotBlank() }
         .mapNotNull { qualifier ->
             val separatorIndex = qualifier.indexOf('=')
-            if (separatorIndex < 0) null else qualifier.substring(0, separatorIndex) to qualifier.substring(separatorIndex + 1)
+            if (separatorIndex < 0) null else qualifier.substring(0, separatorIndex) to qualifier.substring(
+                separatorIndex + 1
+            )
         }
         .toMutableList()
     val existingTypeIndex = qualifiers.indexOfFirst { it.first == "type" }
@@ -236,3 +242,111 @@ private fun withPurlType(purl: String, artifactType: String): String {
 
 internal fun typeFromPurl(purl: String): String? =
     purl.substringAfter('?', "").split('&').firstOrNull { it.startsWith("type=") }?.substringAfter('=')
+
+private fun Bom.patchResolvedNpmGraph(graph: JsResolvedNpmGraph) {
+    println("patchResolvedNpmGraph roots = " + graph.packages.joinToString { "${it.name}@${it.version}" })
+
+    val componentByRef = linkedMapOf<String, Component>()
+    val dependencyByRef = linkedMapOf<String, Dependency>()
+
+    metadata?.component?.bomRef?.let { rootRef ->
+        dependencyByRef[rootRef] = dependencies
+            ?.firstOrNull { it.ref == rootRef }
+            ?.deepCopy()
+            ?: Dependency(rootRef)
+    }
+
+    metadata?.component?.let { root ->
+        root.bomRef?.let { componentByRef[it] = root }
+    }
+
+    components
+        ?.filter { !it.bomRef.isNullOrBlank() }
+        ?.forEach { componentByRef[it.bomRef!!] = it }
+
+    dependencies
+        ?.forEach { dependencyByRef[it.ref] = it.deepCopy() }
+
+    val visited = linkedSetOf<String>()
+    fun visit(node: NpmNode) {
+        val ref = node.toPurl()
+        if (visited.add(ref)) {
+            componentByRef.putIfAbsent(ref, node.toComponent())
+        }
+
+        val currentDependency = dependencyByRef.getOrPut(ref) { Dependency(ref) }
+        val currentChildren = currentDependency.dependencies
+            ?.map { it.ref }
+            ?.toMutableSet()
+            ?: linkedSetOf()
+
+        node.dependencies.forEach { child ->
+            val childRef = child.toPurl()
+            if (currentChildren.add(childRef)) {
+                val newChildren = (currentDependency.dependencies?.toMutableList() ?: mutableListOf())
+                newChildren += Dependency(childRef)
+                currentDependency.dependencies = newChildren
+            }
+            visit(child)
+        }
+    }
+
+    graph.packages.forEach(::visit)
+
+    val rootRef = metadata?.component?.bomRef
+    if (rootRef != null) {
+        val rootDependency = dependencyByRef.getOrPut(rootRef) { Dependency(rootRef) }
+        val existingRootChildren = rootDependency.dependencies
+            ?.map { it.ref }
+            ?.toMutableSet()
+            ?: linkedSetOf()
+
+        graph.packages.forEach { node ->
+            val childRef = node.toPurl()
+            if (existingRootChildren.add(childRef)) {
+                val newChildren = (rootDependency.dependencies?.toMutableList() ?: mutableListOf())
+                newChildren += Dependency(childRef)
+                rootDependency.dependencies = newChildren
+            }
+        }
+    }
+
+    components = componentByRef.values.toMutableList()
+    dependencies = dependencyByRef.values.toMutableList()
+}
+
+private fun Dependency.deepCopy(): Dependency =
+    Dependency(ref).also { copy ->
+        copy.dependencies = dependencies?.map { it.deepCopy() }
+    }
+
+private fun NpmNode.toComponent(): Component =
+    Component().apply {
+        type = Component.Type.LIBRARY
+        name = this@toComponent.name
+        version = this@toComponent.version
+        purl = this@toComponent.toPurl()
+        bomRef = purl
+    }
+
+private fun NpmNode.toPurl(): String =
+    buildString {
+        append("pkg:npm/")
+        append(encodeNpmNameForPurl(name))
+        append('@')
+        append(version)
+    }
+
+private fun encodeNpmNameForPurl(name: String): String {
+    val separatorIndex = name.indexOf('/')
+    return if (name.startsWith("@") && separatorIndex > 1) {
+        val scope = name.substring(0, separatorIndex)
+        val pkg = name.substring(separatorIndex + 1)
+        "${urlEncode(scope)}/${urlEncode(pkg)}"
+    } else {
+        urlEncode(name)
+    }
+}
+
+private fun urlEncode(value: String): String =
+    URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")

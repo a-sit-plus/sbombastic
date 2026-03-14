@@ -21,7 +21,11 @@ abstract class VerifyCyclonedxBomConsistencyTask : DefaultTask() {
         val bom = JsonParser().parse(inputJson.get().asFile)
         val knownRefs = linkedSetOf<String>()
         bom.metadata?.component?.bomRef?.let(knownRefs::add)
-        bom.components?.mapNotNullTo(knownRefs) { it.bomRef }
+        bom.metadata?.component?.purl?.let(knownRefs::add)
+        bom.components?.forEach { component ->
+            component.bomRef?.let(knownRefs::add)
+            component.purl?.let(knownRefs::add)
+        }
 
         val danglingRefs = mutableListOf<String>()
         bom.dependencies?.forEach { dependency ->
@@ -68,24 +72,32 @@ abstract class VerifyCyclonedxBomDirectDependenciesTask : DefaultTask() {
         }
 
         val bom = JsonParser().parse(inputJson.get().asFile)
-        val bomRefToComponent = linkedMapOf<String, SemanticComponentRef>()
-        fun register(ref: String?, component: Component?) {
+
+        val bomRefToComponent = linkedMapOf<String, Component>()
+        fun registerRaw(ref: String?, component: Component?) {
             if (ref == null || component == null) return
-            val group = component.group ?: return
-            val name = component.name ?: return
-            val version = component.version ?: return
-            val type = component.bomRef?.let(::typeFromPurl) ?: component.purl?.let(::typeFromPurl) ?: "unknown"
-            bomRefToComponent[ref] = SemanticComponentRef(group, name, version, type)
+            bomRefToComponent[ref] = component
         }
-        register(bom.metadata?.component?.bomRef, bom.metadata?.component)
-        bom.components?.forEach { register(it.bomRef, it) }
+
+        registerRaw(bom.metadata?.component?.bomRef, bom.metadata?.component)
+        registerRaw(bom.metadata?.component?.purl, bom.metadata?.component)
+        bom.components?.forEach { component ->
+            registerRaw(component.bomRef, component)
+            registerRaw(component.purl, component)
+        }
 
         val rootDependencyEntry = bom.dependencies?.firstOrNull { it.ref == bom.metadata?.component?.bomRef }
             ?: error("Missing dependency entry for root BOM component in ${inputJson.get().asFile}")
-        val actualDirectDependencies = rootDependencyEntry.dependencies.orEmpty().mapTo(linkedSetOf()) { dependsOn ->
-            bomRefToComponent[dependsOn.ref]
-                ?: error("Dependency ref ${dependsOn.ref} missing component mapping in ${inputJson.get().asFile}")
-        }
+
+        val actualDirectDependencies = rootDependencyEntry.dependencies.orEmpty()
+            .asSequence()
+            .filter { dependsOn -> dependsOn.ref.startsWith("pkg:maven/") }
+            .map { dependsOn ->
+                val component = bomRefToComponent[dependsOn.ref]
+                    ?: error("Dependency ref ${dependsOn.ref} missing component mapping in ${inputJson.get().asFile}")
+                component.toSemanticComponentRef(dependsOn.ref)
+            }
+            .toCollection(linkedSetOf())
 
         val missingDirectDependencies = expectedDirectDependencies - actualDirectDependencies
         val unexpectedDirectDependencies = actualDirectDependencies - expectedDirectDependencies
@@ -107,4 +119,19 @@ abstract class VerifyCyclonedxBomDirectDependenciesTask : DefaultTask() {
             }
         }
     }
+}
+
+private fun Component.toSemanticComponentRef(ref: String): SemanticComponentRef {
+    val type = bomRef?.let(::typeFromPurl) ?: purl?.let(::typeFromPurl) ?: ref.let(::typeFromPurl) ?: "unknown"
+
+    if (ref.startsWith("pkg:maven/")) {
+        val group = group ?: error("Maven component for $ref is missing group")
+        val componentName = name ?: error("Maven component for $ref is missing name")
+        val componentVersion = version ?: error("Maven component for $ref is missing version")
+        return SemanticComponentRef(group, componentName, componentVersion, type)
+    }
+
+    val componentName = name ?: error("Component for $ref is missing name")
+    val componentVersion = version ?: error("Component for $ref is missing version")
+    return SemanticComponentRef("", componentName, componentVersion, type)
 }

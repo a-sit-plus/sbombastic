@@ -7,6 +7,7 @@ import at.asitplus.gradle.sbombastic.internal.toOrganizationalEntity
 import at.asitplus.gradle.sbombastic.tasks.NormalizeCyclonedxBomTask
 import at.asitplus.gradle.sbombastic.tasks.VerifyCyclonedxBomConsistencyTask
 import at.asitplus.gradle.sbombastic.tasks.VerifyCyclonedxBomDirectDependenciesTask
+import java.util.Locale
 import org.cyclonedx.Version
 import org.cyclonedx.gradle.CyclonedxDirectTask
 import org.cyclonedx.gradle.CyclonedxPlugin
@@ -25,7 +26,7 @@ import org.gradle.kotlin.dsl.withType
 import org.gradle.language.base.plugins.LifecycleBasePlugin
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
-import java.util.Locale
+import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 
 internal val Project.enableSbombasitc: Boolean
     get() = envExtra[SBOMBASTIC_ENABLED]?.toBoolean() ?: false
@@ -71,6 +72,8 @@ internal fun Project.sbombastic() {
                     return@configureEach
                 }
 
+                val platform = resolvePublicationPlatform(publication.name)
+
                 val cyclonedxTaskName = cyclonedxTaskNameForPublication(publication.name)
                 val cyclonedxTask = tasks.register<CyclonedxDirectTask>(cyclonedxTaskName) {
                     group = LifecycleBasePlugin.VERIFICATION_GROUP
@@ -103,7 +106,19 @@ internal fun Project.sbombastic() {
                             }
                         }Publication"
                     })
+                    if (platform == KotlinPlatformType.js || platform == KotlinPlatformType.wasm) {
+                        dependsOn(
+                            project.rootProject.tasks.matching {
+                                it.name.contains("packageJson", ignoreCase = true) ||
+                                        it.name.contains("rootPackageJson", ignoreCase = true) ||
+                                        it.name.contains("kotlinStoreYarnLock", ignoreCase = true) ||
+                                        it.name.contains("yarnLock", ignoreCase = true)
+                            },
+                        )
+                    }
+
                     publicationName.set(publication.name)
+                    publicationPlatform.set(platform.name)
                     includeConfigs.set(publicationConfigNames)
                     inputJson.set(cyclonedxTask.flatMap { it.jsonOutput })
                     outputJson.set(layout.buildDirectory.file("reports/cyclonedx-publications/${publication.name}/bom.json"))
@@ -170,6 +185,23 @@ internal fun Project.sbombastic() {
             }
         }
     }
+}
+
+private fun Project.resolvePublicationPlatform(publicationName: String): KotlinPlatformType {
+   logger.warn("Resolving publication platform '$publicationName'")
+
+    if (publicationName == "kotlinMultiplatform") {
+        return KotlinPlatformType.common
+    }
+
+    val kotlin = extensions.findByType<KotlinMultiplatformExtension>()
+        ?: return KotlinPlatformType.common
+
+    val target = kotlin.targets.findByName(publicationName)
+        ?: return KotlinPlatformType.common
+
+    logger.warn("Resolving publication platform '$publicationName' with target '$target'")
+    return  target.platformType
 }
 
 @OptIn(ExperimentalKotlinGradlePluginApi::class)

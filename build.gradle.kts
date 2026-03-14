@@ -2,6 +2,7 @@ plugins {
     `java-gradle-plugin`
     `kotlin-dsl`
     `maven-publish`
+    `signing`
 }
 
 group = "at.asitplus.gradle"
@@ -15,7 +16,10 @@ repositories {
 dependencies {
     implementation(gradleApi())
     implementation(localGroovy())
-    implementation("org.cyclonedx:cyclonedx-gradle-plugin:3.0.1")
+    implementation("org.cyclonedx:cyclonedx-gradle-plugin:3.2.2") {
+        //upgrade transitive dependency to a non.vulnerable version
+        implementation("org.cyclonedx:cyclonedx-core-java:11.0.1")
+    }
     compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.0")
 }
 
@@ -35,4 +39,19 @@ gradlePlugin {
 
 kotlin {
     jvmToolchain(17)
+}
+
+publishing {
+    repositories {
+        mavenLocal {
+            signing.isRequired = false
+        }
+    }
+}
+signing {
+    val signingKeyId: String? by project
+    val signingKey: String? by project
+    val signingPassword: String? by project
+    useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+    sign(publishing.publications)
 }
