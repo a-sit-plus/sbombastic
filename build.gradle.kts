@@ -1,0 +1,38 @@
+plugins {
+    `java-gradle-plugin`
+    `kotlin-dsl`
+    `maven-publish`
+}
+
+group = "at.asitplus.gradle"
+version = "0.0.1"
+
+repositories {
+    gradlePluginPortal()
+    mavenCentral()
+}
+
+dependencies {
+    implementation(gradleApi())
+    implementation(localGroovy())
+    implementation("org.cyclonedx:cyclonedx-gradle-plugin:3.0.1")
+    compileOnly("org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.0")
+}
+
+gradlePlugin {
+    website = "https://github.com/a-sit-plus/sbombastic"
+    vcsUrl = "https://github.com/a-sit-plus/sbombastic"
+    plugins {
+        create("sbombastic") {
+            id = "at.asitplus.gradle.sbombastic"
+            implementationClass = "at.asitplus.gradle.sbombastic.MrSbombastic"
+            displayName = "SBOMbastic"
+            description = "Accurate, publication-aware CycloneDX SBOM generation and normalization for Kotlin Mulitplatform"
+            tags = listOf("sbom", "kotlin", "kmp", "multiplatform")
+        }
+    }
+}
+
+kotlin {
+    jvmToolchain(17)
+}
