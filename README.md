@@ -62,6 +62,24 @@ Expected JSON shape for `sbombastic.supplier.mappingsUrl`:
 ]
 ```
 
+## Manually Adding Dependencies
+
+Sometimes a project may depend on external sources (e.g. when no published artefact of an external dependency exists).  
+Such dependencies can be declared on a per-module basis using the custom `sbombastic` DSL:
+
+```kotlin
+sbombastic {
+    manualDependency("upstream-lib") {
+        version.set("1.2.3")
+        vcsUrls.set(listOf("https://github.com/org/upstream-lib.git"))
+
+        supplierName.set("Upstream Org")
+        supplierUrls.set(listOf("https://github.com/org"))
+        supplierContactName.set("Upstream Team")
+        supplierEmail.set("oss@example.org")
+    }
+}
+```
 
 
 <hr>

@@ -13,6 +13,7 @@ import org.cyclonedx.gradle.CyclonedxDirectTask
 import org.cyclonedx.gradle.CyclonedxPlugin
 import org.cyclonedx.model.Component
 import org.gradle.api.Project
+import org.gradle.api.artifacts.ProjectDependency
 import org.gradle.api.attributes.Category
 import org.gradle.api.attributes.DocsType
 import org.gradle.api.attributes.Usage
@@ -35,7 +36,7 @@ internal val Project.licenseId get() = envExtra[LICENSE_ID]?.trim()
 internal val Project.licenseName get() = envExtra[LICENSE_NAME]?.trim()
 internal val Project.licenseUrl get() = envExtra[LICENSE_URL]?.trim()
 
-internal fun Project.sbombastic() {
+internal fun Project.sbombastic(extension: SbombasticExtension) {
     if (!enableSbombasitc) {
         logger.lifecycle("  > SBOM generation disabled for project $path")
         return
@@ -73,6 +74,8 @@ internal fun Project.sbombastic() {
                 }
 
                 val platform = resolvePublicationPlatform(publication.name)
+                val manualDependencies = collectTransitiveManualDependencies(extension)
+                    .map { it.toJson() }
 
                 val cyclonedxTaskName = cyclonedxTaskNameForPublication(publication.name)
                 val cyclonedxTask = tasks.register<CyclonedxDirectTask>(cyclonedxTaskName) {
@@ -129,6 +132,7 @@ internal fun Project.sbombastic() {
                     supplierContactName.set(supplierInfo?.contactName.orEmpty())
                     supplierEmail.set(supplierInfo?.email.orEmpty())
                     supplierMappingsUrl.set(project.supplierMappingsUrlFromEnvExtra().orEmpty())
+                    manualDependenciesJson.set(manualDependencies)
                 }
 
                 if (publication.name == "kotlinMultiplatform") {
@@ -158,13 +162,13 @@ internal fun Project.sbombastic() {
 
                 if (publication.name != "kotlinMultiplatform") {
                     publication.artifact(normalizeTask.flatMap { it.outputJson }) {
-                        classifier = "cyclonedx"
-                        extension = "json"
+                        this.classifier = "cyclonedx"
+                        this.extension = "json"
                         builtBy(normalizeTask)
                     }
                     publication.artifact(normalizeTask.flatMap { it.outputXml }) {
                         classifier = "cyclonedx"
-                        extension = "xml"
+                        this.extension = "xml"
                         builtBy(normalizeTask)
                     }
                 }
@@ -187,9 +191,46 @@ internal fun Project.sbombastic() {
     }
 }
 
-private fun Project.resolvePublicationPlatform(publicationName: String): KotlinPlatformType {
-   logger.warn("Resolving publication platform '$publicationName'")
+private fun Project.collectTransitiveManualDependencies(
+    ownExtension: SbombasticExtension,
+): List<ManualSbomDependency> {
+    val visited = linkedSetOf<Project>()
+    val result = linkedMapOf<String, ManualSbomDependency>()
 
+    fun visit(current: Project) {
+        if (!visited.add(current)) return
+
+        val currentExtension = current.extensions.findByType<SbombasticExtension>()
+        val declared = (currentExtension ?: if (current == this) ownExtension else null)
+            ?.manualDependencies
+            ?.map { it.toModel() }
+            .orEmpty()
+
+        declared.forEach { dependency ->
+            result.putIfAbsent(manualDependencyIdentity(dependency), dependency)
+        }
+
+        current.configurations.forEach { configuration ->
+            configuration.dependencies.withType(ProjectDependency::class.java).forEach { dependency ->
+                visit(project.project(dependency.path))
+            }
+        }
+    }
+
+    visit(this)
+    return result.values.toList()
+}
+
+private fun manualDependencyIdentity(dependency: ManualSbomDependency): String =
+    buildString {
+        append(dependency.name)
+        append('|')
+        append(dependency.version)
+        append('|')
+        append(dependency.vcsUrls.joinToString(","))
+    }
+
+private fun Project.resolvePublicationPlatform(publicationName: String): KotlinPlatformType {
     if (publicationName == "kotlinMultiplatform") {
         return KotlinPlatformType.common
     }
@@ -200,8 +241,7 @@ private fun Project.resolvePublicationPlatform(publicationName: String): KotlinP
     val target = kotlin.targets.findByName(publicationName)
         ?: return KotlinPlatformType.common
 
-    logger.warn("Resolving publication platform '$publicationName' with target '$target'")
-    return  target.platformType
+    return target.platformType
 }
 
 @OptIn(ExperimentalKotlinGradlePluginApi::class)

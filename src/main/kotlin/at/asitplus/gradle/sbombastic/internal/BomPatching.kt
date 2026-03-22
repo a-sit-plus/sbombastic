@@ -1,12 +1,21 @@
 package at.asitplus.gradle.sbombastic.internal
 
+import at.asitplus.gradle.sbombastic.ManualSbomDependency
+import at.asitplus.gradle.sbombastic.ManualSbomSupplier
 import at.asitplus.gradle.sbombastic.licenseId
 import at.asitplus.gradle.sbombastic.licenseName
 import at.asitplus.gradle.sbombastic.licenseUrl
-import org.cyclonedx.model.*
-import org.gradle.api.Project
-import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 import java.net.URLEncoder
+import org.cyclonedx.model.Component
+import org.cyclonedx.model.Dependency
+import org.cyclonedx.model.ExternalReference
+import org.cyclonedx.model.License
+import org.cyclonedx.model.LicenseChoice
+import org.cyclonedx.model.Metadata
+import org.cyclonedx.model.OrganizationalContact
+import org.cyclonedx.model.OrganizationalEntity
+import org.cyclonedx.model.Bom
+import org.gradle.api.Project
 
 internal fun SupplierInfo.toOrganizationalEntity(): OrganizationalEntity =
     OrganizationalEntity().apply {
@@ -30,6 +39,7 @@ internal fun Bom.normalizeBom(
     supplierInfo: SupplierInfo?,
     thirdPartySupplierMappings: List<SupplierMapping>,
     jsNpmGraph: JsResolvedNpmGraph?,
+    manualDependencies: List<ManualSbomDependency>,
 ): Bom {
     metadata?.component?.rewriteComponent(normalizationPlan, refRewrites)
     components?.forEach { component -> component.rewriteComponent(normalizationPlan, refRewrites) }
@@ -41,6 +51,10 @@ internal fun Bom.normalizeBom(
         patchResolvedNpmGraph(jsNpmGraph)
     }
 
+    if (manualDependencies.isNotEmpty()) {
+        patchManualDependencies(manualDependencies)
+    }
+
     patchSupplierMetadata(supplierInfo, thirdPartySupplierMappings)
 
     project.licenseId?.let {
@@ -49,6 +63,102 @@ internal fun Bom.normalizeBom(
     }
     return this
 }
+
+private fun Bom.patchManualDependencies(manualDependencies: List<ManualSbomDependency>) {
+    val componentByRef = linkedMapOf<String, Component>()
+    val dependencyByRef = linkedMapOf<String, Dependency>()
+
+    metadata?.component?.bomRef?.let { rootRef ->
+        dependencyByRef[rootRef] = dependencies
+            ?.firstOrNull { it.ref == rootRef }
+            ?.deepCopy()
+            ?: Dependency(rootRef)
+    }
+
+    metadata?.component?.let { root ->
+        root.bomRef?.let { componentByRef[it] = root }
+    }
+
+    components
+        ?.filter { !it.bomRef.isNullOrBlank() }
+        ?.forEach { componentByRef[it.bomRef!!] = it }
+
+    dependencies
+        ?.forEach { dependencyByRef[it.ref] = it.deepCopy() }
+
+    val rootRef = metadata?.component?.bomRef ?: return
+    val rootDependency = dependencyByRef.getOrPut(rootRef) { Dependency(rootRef) }
+    val existingRootChildren = rootDependency.dependencies
+        ?.map { it.ref }
+        ?.toMutableSet()
+        ?: linkedSetOf()
+
+    manualDependencies.forEach { manual ->
+        val component = manual.toComponent()
+        val ref = component.bomRef ?: return@forEach
+        componentByRef.putIfAbsent(ref, component)
+
+        if (existingRootChildren.add(ref)) {
+            val newChildren = (rootDependency.dependencies?.toMutableList() ?: mutableListOf())
+            newChildren += Dependency(ref)
+            rootDependency.dependencies = newChildren
+        }
+
+        dependencyByRef.putIfAbsent(ref, Dependency(ref))
+    }
+
+    components = componentByRef.values.toMutableList()
+    dependencies = dependencyByRef.values.toMutableList()
+}
+
+private fun ManualSbomDependency.toComponent(): Component =
+    Component().apply {
+        type = Component.Type.LIBRARY
+        name = this@toComponent.name
+        version = this@toComponent.version
+        purl = this@toComponent.toPurl()
+        bomRef = purl
+        externalReferences = vcsUrls.map { url ->
+            ExternalReference().apply {
+                type = ExternalReference.Type.VCS
+                this.url = url
+            }
+        }
+        supplier = this@toComponent.supplier?.toOrganizationalEntity()
+    }
+
+private fun ManualSbomDependency.toPurl(): String {
+    val encodedName = urlEncode(name)
+    val encodedVersion = urlEncode(version)
+    val qualifier = vcsUrls.firstOrNull()
+        ?.takeIf { it.isNotBlank() }
+        ?.let { "vcs_url=${urlEncode(it)}" }
+
+    return buildString {
+        append("pkg:generic/")
+        append(encodedName)
+        append('@')
+        append(encodedVersion)
+        if (qualifier != null) {
+            append('?')
+            append(qualifier)
+        }
+    }
+}
+
+private fun ManualSbomSupplier.toOrganizationalEntity(): OrganizationalEntity =
+    OrganizationalEntity().apply {
+        name = this@toOrganizationalEntity.name
+        urls = this@toOrganizationalEntity.urls
+        if (this@toOrganizationalEntity.contactName != null || this@toOrganizationalEntity.email != null) {
+            addContact(
+                OrganizationalContact().apply {
+                    name = this@toOrganizationalEntity.contactName
+                    email = this@toOrganizationalEntity.email
+                },
+            )
+        }
+    }
 
 private fun Bom.patchLicenseMetadata(
     licenseId: String,
@@ -119,7 +229,6 @@ private fun Bom.patchSupplierMetadata(
                     component.supplier = firstPartySupplier
                 }
             }
-
             else -> {
                 val thirdPartySupplier =
                     thirdPartySupplierMappings.findSupplierForGroup(group)?.toOrganizationalEntity()
@@ -225,9 +334,7 @@ private fun withPurlType(purl: String, artifactType: String): String {
         .filter { it.isNotBlank() }
         .mapNotNull { qualifier ->
             val separatorIndex = qualifier.indexOf('=')
-            if (separatorIndex < 0) null else qualifier.substring(0, separatorIndex) to qualifier.substring(
-                separatorIndex + 1
-            )
+            if (separatorIndex < 0) null else qualifier.substring(0, separatorIndex) to qualifier.substring(separatorIndex + 1)
         }
         .toMutableList()
     val existingTypeIndex = qualifiers.indexOfFirst { it.first == "type" }
@@ -244,8 +351,6 @@ internal fun typeFromPurl(purl: String): String? =
     purl.substringAfter('?', "").split('&').firstOrNull { it.startsWith("type=") }?.substringAfter('=')
 
 private fun Bom.patchResolvedNpmGraph(graph: JsResolvedNpmGraph) {
-    println("patchResolvedNpmGraph roots = " + graph.packages.joinToString { "${it.name}@${it.version}" })
-
     val componentByRef = linkedMapOf<String, Component>()
     val dependencyByRef = linkedMapOf<String, Dependency>()
 

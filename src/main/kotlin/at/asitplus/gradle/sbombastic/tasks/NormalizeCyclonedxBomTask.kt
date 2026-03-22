@@ -1,5 +1,6 @@
 package at.asitplus.gradle.sbombastic.tasks
 
+import at.asitplus.gradle.sbombastic.manualSbomDependencyFromJson
 import at.asitplus.gradle.sbombastic.internal.JsYarnV1NpmGraphCollector
 import at.asitplus.gradle.sbombastic.internal.SupplierInfo
 import at.asitplus.gradle.sbombastic.internal.buildNormalizationPlan
@@ -44,6 +45,9 @@ abstract class NormalizeCyclonedxBomTask : DefaultTask() {
     @get:Input
     abstract val supplierMappingsUrl: Property<String>
 
+    @get:Input
+    abstract val manualDependenciesJson: ListProperty<String>
+
     @get:InputFile
     abstract val inputJson: org.gradle.api.file.RegularFileProperty
 
@@ -56,9 +60,7 @@ abstract class NormalizeCyclonedxBomTask : DefaultTask() {
     @TaskAction
     fun normalize() {
         val normalizedPublicationName = publicationName.get()
-        val resolvedPublicationPlatform = publicationPlatform.get()
-            .let {  KotlinPlatformType.valueOf(it)  }
-        logger.warn("normalizing for publication '$normalizedPublicationName' with platform '$resolvedPublicationPlatform'")
+        val resolvedPublicationPlatform = KotlinPlatformType.valueOf(publicationPlatform.get())
 
         val normalizationPlan = project.buildNormalizationPlan(normalizedPublicationName, includeConfigs.get())
         val publicationCoordinates = project.projectPublicationCoordinates(normalizedPublicationName)
@@ -84,10 +86,8 @@ abstract class NormalizeCyclonedxBomTask : DefaultTask() {
 
         val shouldResolveNpm = resolvedPublicationPlatform == KotlinPlatformType.js ||
                 resolvedPublicationPlatform == KotlinPlatformType.wasm
-        logger.warn("patching ${inputJson.get()} for $publicationPlatform: $shouldResolveNpm")
-        val jsNpmGraph = if (
-            shouldResolveNpm
-        ) {
+
+        val jsNpmGraph = if (shouldResolveNpm) {
             val workspacePackageDirName = buildString {
                 append(project.rootProject.name)
                 if (project != project.rootProject) {
@@ -96,27 +96,31 @@ abstract class NormalizeCyclonedxBomTask : DefaultTask() {
                 }
             }
 
-            val jsPubDir =if( resolvedPublicationPlatform == KotlinPlatformType.js) "js" else "wasm"
-            val jsWorkspacePackageDir = project.rootProject.layout.buildDirectory
-                .dir("$jsPubDir/packages/$workspacePackageDirName")
-                .get()
-                .asFile
+            val packageDir = if (resolvedPublicationPlatform == KotlinPlatformType.wasm) {
+                project.rootProject.layout.buildDirectory
+                    .dir("wasm/packages/$workspacePackageDirName")
+                    .get()
+                    .asFile
+            } else {
+                project.rootProject.layout.buildDirectory
+                    .dir("js/packages/$workspacePackageDirName")
+                    .get()
+                    .asFile
+            }
 
             val yarnLockFile = project.rootProject.projectDir.resolve("kotlin-js-store/yarn.lock")
 
             JsYarnV1NpmGraphCollector.collect(
                 project = project,
-                workspacePackageDir = jsWorkspacePackageDir,
+                workspacePackageDir = packageDir,
                 yarnLockFile = yarnLockFile,
             )
         } else {
             null
         }
-        logger.warn(
-            "npm graph for {}: roots={}",
-            publicationName.get(),
-            jsNpmGraph?.packages?.joinToString { "${it.name}@${it.version}" } ?: "<none>",
-        )
+
+        val manualDependencies = manualDependenciesJson.getOrElse(emptyList())
+            .map(::manualSbomDependencyFromJson)
 
         val refRewrites = LinkedHashMap<String, String>()
         val jsonBom = JsonParser().parse(inputJson.get().asFile)
@@ -128,6 +132,7 @@ abstract class NormalizeCyclonedxBomTask : DefaultTask() {
                 supplierInfo = supplierInfo,
                 thirdPartySupplierMappings = thirdPartySupplierMappings,
                 jsNpmGraph = jsNpmGraph,
+                manualDependencies = manualDependencies,
             )
 
         outputJson.get().asFile.apply {
