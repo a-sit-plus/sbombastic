@@ -1,8 +1,7 @@
 plugins {
-    `java-gradle-plugin`
     `kotlin-dsl`
-    `maven-publish`
     `signing`
+    id("com.gradle.plugin-publish") version "1.2.1"
 }
 
 group = "at.asitplus.gradle"
