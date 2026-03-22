@@ -2,10 +2,11 @@ package at.asitplus.gradle.sbombastic.internal
 
 import at.asitplus.gradle.sbombastic.*
 import groovy.json.JsonSlurper
-import org.gradle.api.Project
 import java.net.URL
 import java.net.URLConnection
-import java.util.*
+import java.util.Locale
+import org.cyclonedx.model.Component
+import org.gradle.api.Project
 
 internal data class SupplierInfo(
     val name: String,
@@ -14,18 +15,47 @@ internal data class SupplierInfo(
     val email: String?,
 )
 
+internal enum class SupplierMappingType {
+    mvn,
+    npm,
+}
+
 internal data class SupplierMapping(
+    val type: SupplierMappingType,
     val groups: List<String>,
+    val packages: List<String>,
     val supplier: SupplierInfo,
 )
+
+internal fun List<SupplierMapping>.findSupplierForComponent(component: Component): SupplierInfo? {
+    val purl = component.purl ?: component.bomRef
+    val purlType = purl?.substringAfter("pkg:", "")?.substringBefore('/')
+    return when (purlType) {
+        "npm" -> findSupplierForNpmPackage(component.name)
+        else -> findSupplierForGroup(component.group)
+    }
+}
 
 internal fun List<SupplierMapping>.findSupplierForGroup(group: String?): SupplierInfo? {
     if (group.isNullOrBlank()) return null
 
     return asSequence()
+        .filter { it.type == SupplierMappingType.mvn }
         .flatMap { mapping -> mapping.groups.asSequence().map { prefix -> prefix to mapping.supplier } }
-        .filter { (prefix, _) -> group == prefix || (if (prefix.endsWith(".*")) group.startsWith(prefix.dropLast(1)) else false) }
+        .filter { (prefix, _) ->
+            group == prefix || (if (prefix.endsWith(".*")) group.startsWith(prefix.dropLast(1)) else false)
+        }
         .maxByOrNull { (prefix, _) -> prefix.length }
+        ?.second
+}
+
+internal fun List<SupplierMapping>.findSupplierForNpmPackage(packageName: String?): SupplierInfo? {
+    if (packageName.isNullOrBlank()) return null
+
+    return asSequence()
+        .filter { it.type == SupplierMappingType.npm }
+        .flatMap { mapping -> mapping.packages.asSequence().map { pkg -> pkg to mapping.supplier } }
+        .firstOrNull { (pkg, _) -> pkg == packageName }
         ?.second
 }
 
@@ -74,13 +104,33 @@ internal fun loadSupplierMappings(urlString: String): List<SupplierMapping> {
             "Supplier mapping entry #$index must be an object"
         }
 
-        val prefixes = (rawEntry["groups"] as? List<*>)
+        val type = (rawEntry["type"]?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: "mvn")
+            .let {
+                try {
+                    SupplierMappingType.valueOf(it)
+                } catch (_: IllegalArgumentException) {
+                    error("Supplier mapping entry #$index has invalid 'type': $it (expected 'mvn' or 'npm')")
+                }
+            }
+
+        val groups = (rawEntry["groups"] as? List<*>)
             ?.mapNotNull { it?.toString()?.trim() }
             ?.filter { it.isNotBlank() }
             .orEmpty()
 
-        require(prefixes.isNotEmpty()) {
-            "Supplier mapping entry #$index must contain a non-empty 'groups' list"
+        val packages = (rawEntry["packages"] as? List<*>)
+            ?.mapNotNull { it?.toString()?.trim() }
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+
+        when (type) {
+            SupplierMappingType.mvn -> require(groups.isNotEmpty()) {
+                "Supplier mapping entry #$index with type 'mvn' must contain a non-empty 'groups' list"
+            }
+
+            SupplierMappingType.npm -> require(packages.isNotEmpty()) {
+                "Supplier mapping entry #$index with type 'npm' must contain a non-empty 'packages' list"
+            }
         }
 
         val rawSupplier = rawEntry["supplier"] as? Map<*, *>
@@ -101,7 +151,9 @@ internal fun loadSupplierMappings(urlString: String): List<SupplierMapping> {
         val email = rawSupplier["email"]?.toString()?.trim()?.ifBlank { null }
 
         SupplierMapping(
-            groups = prefixes,
+            type = type,
+            groups = groups,
+            packages = packages,
             supplier = SupplierInfo(name = name, urls = urls, contactName = contactName, email = email),
         )
     }

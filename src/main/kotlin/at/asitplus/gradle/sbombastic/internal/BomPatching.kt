@@ -6,6 +6,7 @@ import at.asitplus.gradle.sbombastic.licenseId
 import at.asitplus.gradle.sbombastic.licenseName
 import at.asitplus.gradle.sbombastic.licenseUrl
 import java.net.URLEncoder
+import org.cyclonedx.model.Bom
 import org.cyclonedx.model.Component
 import org.cyclonedx.model.Dependency
 import org.cyclonedx.model.ExternalReference
@@ -14,7 +15,6 @@ import org.cyclonedx.model.LicenseChoice
 import org.cyclonedx.model.Metadata
 import org.cyclonedx.model.OrganizationalContact
 import org.cyclonedx.model.OrganizationalEntity
-import org.cyclonedx.model.Bom
 import org.gradle.api.Project
 
 internal fun SupplierInfo.toOrganizationalEntity(): OrganizationalEntity =
@@ -221,7 +221,7 @@ private fun Bom.patchSupplierMetadata(
     }
 
     components?.forEach { component ->
-        val group = component.group ?: return@forEach
+        val group = component.group
 
         when {
             ownGroup != null && group == ownGroup -> {
@@ -230,8 +230,7 @@ private fun Bom.patchSupplierMetadata(
                 }
             }
             else -> {
-                val thirdPartySupplier =
-                    thirdPartySupplierMappings.findSupplierForGroup(group)?.toOrganizationalEntity()
+                val thirdPartySupplier = thirdPartySupplierMappings.findSupplierForComponent(component)?.toOrganizationalEntity()
                 if (thirdPartySupplier != null) {
                     component.supplier = thirdPartySupplier
                 }

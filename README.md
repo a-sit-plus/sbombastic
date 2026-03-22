@@ -51,12 +51,23 @@ Expected JSON shape for `sbombastic.supplier.mappingsUrl`:
 ```json
 [
   {
+    "type": "mvn",
     "groups": ["at.asitplus.*"],
     "supplier": {
       "name": "A-SIT Plus GmbH",
       "urls": ["https://plus.a-sit.at", "https://github.com/a-sit-plus"],
       "contactName": "A-SIT Plus Opensource",
       "email": "opensource@a-sit.at"
+    }
+  },
+  {
+    "type": "npm",
+    "packages": ["some-example-name", "@xampl/some-scoped-example"],
+    "supplier": {
+      "name": "Example, Inc.",
+      "urls": ["https://example.com"],
+      "contactName": "Example Open Source Inquiries",
+      "email": "opensource@example.com"
     }
   }
 ]
