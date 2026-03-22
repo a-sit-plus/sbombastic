@@ -13,7 +13,7 @@ import org.cyclonedx.gradle.CyclonedxDirectTask
 import org.cyclonedx.gradle.CyclonedxPlugin
 import org.cyclonedx.model.Component
 import org.gradle.api.Project
-import org.gradle.api.artifacts.ProjectDependency
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
 import org.gradle.api.attributes.Category
 import org.gradle.api.attributes.DocsType
 import org.gradle.api.attributes.Usage
@@ -31,6 +31,8 @@ import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 
 internal val Project.enableSbombasitc: Boolean
     get() = envExtra[SBOMBASTIC_ENABLED]?.toBoolean() ?: false
+internal val Project.debugManualDependencies: Boolean
+    get() = envExtra[SBOMBASTIC_DEBUG_MANUAL]?.toBoolean() ?: false
 
 internal val Project.licenseId get() = envExtra[LICENSE_ID]?.trim()
 internal val Project.licenseName get() = envExtra[LICENSE_NAME]?.trim()
@@ -74,9 +76,6 @@ internal fun Project.sbombastic(extension: SbombasticExtension) {
                 }
 
                 val platform = resolvePublicationPlatform(publication.name)
-                val manualDependencies = collectTransitiveManualDependencies(extension)
-                    .map { it.toJson() }
-
                 val cyclonedxTaskName = cyclonedxTaskNameForPublication(publication.name)
                 val cyclonedxTask = tasks.register<CyclonedxDirectTask>(cyclonedxTaskName) {
                     group = LifecycleBasePlugin.VERIFICATION_GROUP
@@ -132,7 +131,31 @@ internal fun Project.sbombastic(extension: SbombasticExtension) {
                     supplierContactName.set(supplierInfo?.contactName.orEmpty())
                     supplierEmail.set(supplierInfo?.email.orEmpty())
                     supplierMappingsUrl.set(project.supplierMappingsUrlFromEnvExtra().orEmpty())
-                    manualDependenciesJson.set(manualDependencies)
+                    manualDependenciesJson.set(
+                        providers.provider {
+                            val collection = collectTransitiveManualDependencies(
+                                ownExtension = extension,
+                                includeConfigs = publicationConfigNames,
+                            )
+                            if (debugManualDependencies) {
+                                logger.lifecycle(
+                                    buildString {
+                                        append("  > SBOM manual dependency collection for ")
+                                        append(path)
+                                        append(':')
+                                        append(publication.name)
+                                        append(" using configs ")
+                                        append(collection.configurations.joinToString(prefix = "[", postfix = "]"))
+                                        append(" visited projects ")
+                                        append(collection.visitedProjects.joinToString(prefix = "[", postfix = "]"))
+                                        append(" collected ")
+                                        append(collection.dependencies.map { it.name }.joinToString(prefix = "[", postfix = "]"))
+                                    },
+                                )
+                            }
+                            collection.dependencies.map { it.toJson() }
+                        },
+                    )
                 }
 
                 if (publication.name == "kotlinMultiplatform") {
@@ -193,9 +216,11 @@ internal fun Project.sbombastic(extension: SbombasticExtension) {
 
 private fun Project.collectTransitiveManualDependencies(
     ownExtension: SbombasticExtension,
-): List<ManualSbomDependency> {
+    includeConfigs: List<String>,
+): ManualDependencyCollection {
     val visited = linkedSetOf<Project>()
     val result = linkedMapOf<String, ManualSbomDependency>()
+    val resolvedConfigurations = linkedSetOf<String>()
 
     fun visit(current: Project) {
         if (!visited.add(current)) return
@@ -209,17 +234,32 @@ private fun Project.collectTransitiveManualDependencies(
         declared.forEach { dependency ->
             result.putIfAbsent(manualDependencyIdentity(dependency), dependency)
         }
-
-        current.configurations.forEach { configuration ->
-            configuration.dependencies.withType(ProjectDependency::class.java).forEach { dependency ->
-                visit(project.project(dependency.path))
-            }
-        }
     }
 
     visit(this)
-    return result.values.toList()
+
+    includeConfigs.asSequence()
+        .mapNotNull(configurations::findByName)
+        .forEach { configuration ->
+            resolvedConfigurations += configuration.name
+            configuration.incoming.resolutionResult.allComponents.forEach { component ->
+                val projectId = component.id as? ProjectComponentIdentifier ?: return@forEach
+                rootProject.findProject(projectId.projectPath)?.let(::visit)
+            }
+        }
+
+    return ManualDependencyCollection(
+        dependencies = result.values.toList(),
+        visitedProjects = visited.map(Project::getPath),
+        configurations = resolvedConfigurations.toList(),
+    )
 }
+
+private data class ManualDependencyCollection(
+    val dependencies: List<ManualSbomDependency>,
+    val visitedProjects: List<String>,
+    val configurations: List<String>,
+)
 
 private fun manualDependencyIdentity(dependency: ManualSbomDependency): String =
     buildString {
@@ -236,10 +276,20 @@ private fun Project.resolvePublicationPlatform(publicationName: String): KotlinP
     }
 
     val kotlin = extensions.findByType<KotlinMultiplatformExtension>()
-        ?: return KotlinPlatformType.common
+    if (kotlin == null) {
+        return if (pluginManager.hasPlugin("org.jetbrains.kotlin.jvm")) {
+            KotlinPlatformType.jvm
+        } else {
+            KotlinPlatformType.common
+        }
+    }
 
     val target = kotlin.targets.findByName(publicationName)
-        ?: return KotlinPlatformType.common
+        ?: return if (pluginManager.hasPlugin("org.jetbrains.kotlin.jvm")) {
+            KotlinPlatformType.jvm
+        } else {
+            KotlinPlatformType.common
+        }
 
     return target.platformType
 }
@@ -300,14 +350,23 @@ private fun Project.cyclonedxConfigsForPublication(publicationName: String): Lis
         return listOf("allSourceSetsCompileDependenciesMetadata")
     }
 
-    val orderedCandidates = listOf(
-        "${publicationName}RuntimeClasspath",
-        "${publicationName}CompileClasspath",
-        "${publicationName}CompileKlibraries",
-        "${publicationName}CompilationDependenciesMetadata",
-        "${publicationName}MainResolvableDependenciesMetadata",
-        "${publicationName}MainImplementationDependenciesMetadata",
-    )
+    val orderedCandidates = buildList {
+        addAll(
+            listOf(
+                "${publicationName}RuntimeClasspath",
+                "${publicationName}CompileClasspath",
+                "${publicationName}CompileKlibraries",
+                "${publicationName}CompilationDependenciesMetadata",
+                "${publicationName}MainResolvableDependenciesMetadata",
+                "${publicationName}MainImplementationDependenciesMetadata",
+            ),
+        )
+
+        if (pluginManager.hasPlugin("org.jetbrains.kotlin.jvm")) {
+            add("runtimeClasspath")
+            add("compileClasspath")
+        }
+    }
 
     return orderedCandidates.mapNotNull { configurations.findByName(it)?.name }.distinct()
 }

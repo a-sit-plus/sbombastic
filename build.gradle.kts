@@ -30,8 +30,8 @@ gradlePlugin {
             id = "at.asitplus.gradle.sbombastic"
             implementationClass = "at.asitplus.gradle.sbombastic.MrSbombastic"
             displayName = "SBOMbastic"
-            description = "Accurate, publication-aware CycloneDX SBOM generation and normalization for Kotlin Mulitplatform"
-            tags = listOf("sbom", "kotlin", "kmp", "multiplatform")
+            description = "Accurate, publication-aware CycloneDX SBOM generation and normalization for Kotlin Multiplatform and Kotlin/JVM"
+            tags = listOf("sbom", "kotlin", "kmp", "multiplatform", "jvm")
         }
     }
 }

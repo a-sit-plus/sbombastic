@@ -4,6 +4,8 @@ import org.gradle.api.Project
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.component.ProjectComponentIdentifier
 import org.gradle.api.artifacts.result.ResolvedArtifactResult
+import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 
 internal fun Project.buildNormalizationPlan(
     publicationName: String,
@@ -12,6 +14,7 @@ internal fun Project.buildNormalizationPlan(
     val artifactTypes = linkedMapOf<SbomComponentCoordinates, MutableSet<String>>()
     val pomPackagings = linkedMapOf<SbomComponentCoordinates, MutableSet<String>>()
     val coordinateAliases = linkedMapOf<SbomComponentCoordinates, SbomComponentCoordinates>()
+    val requestedPlatform = resolvePublicationPlatformForNormalization(publicationName)
 
     projectPublicationCoordinates(publicationName)?.let { publicationCoordinates ->
         pomPackagings.getOrPut(publicationCoordinates.coordinates) { linkedSetOf() }
@@ -50,7 +53,7 @@ internal fun Project.buildNormalizationPlan(
                         name = dependencyProject.name,
                         version = dependencyProject.version.toString(),
                     )
-                    dependencyProject.projectPublicationCoordinates(publicationName)?.let { publicationCoordinates ->
+                    dependencyProject.findPublicationCoordinates(publicationName, requestedPlatform)?.let { publicationCoordinates ->
                         coordinateAliases[fallbackCoordinates] = publicationCoordinates.coordinates
                         pomPackagings.getOrPut(publicationCoordinates.coordinates) { linkedSetOf() }
                             .add(publicationCoordinates.packaging)
@@ -70,4 +73,13 @@ internal fun Project.buildNormalizationPlan(
     }
 
     return SbomNormalizationPlan(exactArtifactTypes = exactExtensions, coordinateAliases = coordinateAliases)
+}
+
+private fun Project.resolvePublicationPlatformForNormalization(publicationName: String): KotlinPlatformType = when {
+    publicationName == "kotlinMultiplatform" -> KotlinPlatformType.common
+    pluginManager.hasPlugin("org.jetbrains.kotlin.jvm") -> KotlinPlatformType.jvm
+    else -> {
+        val kotlin = extensions.findByType(KotlinMultiplatformExtension::class.java) ?: return KotlinPlatformType.common
+        kotlin.targets.findByName(publicationName)?.platformType ?: KotlinPlatformType.common
+    }
 }
