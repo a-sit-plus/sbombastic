@@ -15,6 +15,8 @@ Gradle plugin to generate accurate CycloneDX SBOMs for Kotlin Multiplatform and 
 
 Features:
 - publication-aware CycloneDX SBOM generation
+  - correct mapping of target-specific dependencies
+  - recursive resolution of npm dependencies pulled in by Kotlin JS dependencies
 - normalized PURLs and dependency alignment
 - root KMP SBOM exposure through documentation variants in Gradle metadata
 - supplier injection for first-party modules and third-party dependencies via prefix mapping JSON
