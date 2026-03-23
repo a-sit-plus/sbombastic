@@ -11,7 +11,7 @@
 
 # SBOMbastic Gradle Plugin
 
-Gradle plugin to generate accurate CycloneDX SBOMs für Kotlin Multiplatform (plugin id: `at.asitplus.gradle.sbombastic`).
+Gradle plugin to generate accurate CycloneDX SBOMs for Kotlin Multiplatform and Kotlin/JVM projects (plugin id: `at.asitplus.gradle.sbombastic`).
 
 Features:
 - publication-aware CycloneDX SBOM generation
@@ -21,9 +21,8 @@ Features:
 
 ## Configuration
 
-Add `at.asitplus.gradle.sbombastic`) to your root plugin. It must be a multi-module Gradle project and it must be
-Kotlin Multiplatform. So if you are going for a JVM-Only project an Android-only project, you currently have to still
-model it as a kotlin multiplatform project.
+Add `at.asitplus.gradle.sbombastic` to your root plugin. It must be a multi-module Gradle project.
+Modules can be Kotlin Multiplatform or plain Kotlin/JVM projects.
 
 Supported `gradle.properties` / environment keys:
 - `sbombastic.enabled` global toggle, must be set to `true` to enable SBOMbastic

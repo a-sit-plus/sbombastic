@@ -1,5 +1,6 @@
 package at.asitplus.gradle.sbombastic.tasks
 
+import at.asitplus.gradle.sbombastic.debugManualDependencies
 import at.asitplus.gradle.sbombastic.manualSbomDependencyFromJson
 import at.asitplus.gradle.sbombastic.internal.JsYarnV1NpmGraphCollector
 import at.asitplus.gradle.sbombastic.internal.SupplierInfo
@@ -134,6 +135,42 @@ abstract class NormalizeCyclonedxBomTask : DefaultTask() {
                 jsNpmGraph = jsNpmGraph,
                 manualDependencies = manualDependencies,
             )
+
+        if (project.debugManualDependencies) {
+            val genericComponents = buildList {
+                jsonBom.metadata?.component?.takeIf { component ->
+                    component.bomRef?.startsWith("pkg:generic/") == true || component.purl?.startsWith("pkg:generic/") == true
+                }?.let(::add)
+                jsonBom.components.orEmpty().forEach { component ->
+                    if (component.bomRef?.startsWith("pkg:generic/") == true || component.purl?.startsWith("pkg:generic/") == true) {
+                        add(component)
+                    }
+                }
+            }
+            val rootRef = jsonBom.metadata?.component?.bomRef
+            val rootDependsOn = jsonBom.dependencies.orEmpty()
+                .firstOrNull { it.ref == rootRef }
+                ?.dependencies
+                .orEmpty()
+                .map { it.ref }
+
+            logger.lifecycle(
+                buildString {
+                    append("  > SBOM normalized manual output for ")
+                    append(project.path)
+                    append(':')
+                    append(normalizedPublicationName)
+                    append(" generic components ")
+                    append(
+                        genericComponents.map { component ->
+                            component.name + ":" + component.version
+                        }.joinToString(prefix = "[", postfix = "]"),
+                    )
+                    append(" root dependsOn ")
+                    append(rootDependsOn.joinToString(prefix = "[", postfix = "]"))
+                },
+            )
+        }
 
         outputJson.get().asFile.apply {
             parentFile.mkdirs()

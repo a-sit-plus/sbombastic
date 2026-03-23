@@ -45,7 +45,8 @@ internal fun Bom.normalizeBom(
     components?.forEach { component -> component.rewriteComponent(normalizationPlan, refRewrites) }
     dependencies = dependencies?.map { it.rewrittenDependency(refRewrites) }?.toMutableList()
 
-    alignRootDependenciesToPublicationPom(publicationCoordinates)
+    ensurePublicationDirectDependenciesPresent(project, publicationCoordinates, normalizationPlan)
+    alignRootDependenciesToPublicationPom(publicationCoordinates, normalizationPlan)
 
     if (jsNpmGraph != null) {
         patchResolvedNpmGraph(jsNpmGraph)
@@ -239,7 +240,10 @@ private fun Bom.patchSupplierMetadata(
     }
 }
 
-private fun Bom.alignRootDependenciesToPublicationPom(publicationCoordinates: PublishedCoordinates) {
+private fun Bom.alignRootDependenciesToPublicationPom(
+    publicationCoordinates: PublishedCoordinates,
+    normalizationPlan: SbomNormalizationPlan,
+) {
     val rootRef = metadata?.component?.bomRef ?: return
     val rootDependency = dependencies?.firstOrNull { it.ref == rootRef } ?: return
     val byCoordinates = linkedMapOf<SbomComponentCoordinates, String>()
@@ -261,8 +265,65 @@ private fun Bom.alignRootDependenciesToPublicationPom(publicationCoordinates: Pu
             byCoordinates[SbomComponentCoordinates(group, name, version)] = bomRef
         }
     }
+    normalizationPlan.coordinateAliases.forEach { (originalCoordinates, targetCoordinates) ->
+        val targetRef = byCoordinates[targetCoordinates]
+        val originalRef = byCoordinates[originalCoordinates]
+        if (targetRef != null && originalRef == null) {
+            byCoordinates[originalCoordinates] = targetRef
+        }
+        if (originalRef != null && targetRef == null) {
+            byCoordinates[targetCoordinates] = originalRef
+        }
+    }
     rootDependency.dependencies = publicationCoordinates.directDependencies.mapNotNull { coordinates ->
         byCoordinates[coordinates]?.let(::Dependency)
+    }
+}
+
+private fun Bom.ensurePublicationDirectDependenciesPresent(
+    project: Project,
+    publicationCoordinates: PublishedCoordinates,
+    normalizationPlan: SbomNormalizationPlan,
+) {
+    val indexedComponents = mutableListOf<Component>()
+    metadata?.component?.let(indexedComponents::add)
+    components?.let(indexedComponents::addAll)
+
+    val byCoordinates = linkedMapOf<SbomComponentCoordinates, Component>()
+    indexedComponents.forEach { component ->
+        val group = component.group
+        val name = component.name
+        val version = component.version
+        if (group != null && name != null && version != null) {
+            byCoordinates[SbomComponentCoordinates(group, name, version)] = component
+        }
+    }
+
+    val extraComponents = mutableListOf<Component>()
+    publicationCoordinates.directDependencies.forEach { coordinates ->
+        if (byCoordinates.containsKey(coordinates)) return@forEach
+
+        val artifactType = normalizationPlan.exactArtifactTypes[coordinates]
+            ?: project.packagingForCoordinates(coordinates)
+            ?: "jar"
+        val purl = withPurlType(
+            "pkg:maven/${coordinates.group}/${coordinates.name}@${coordinates.version}",
+            artifactType,
+        )
+        val syntheticComponent = Component().apply {
+            type = Component.Type.LIBRARY
+            group = coordinates.group
+            name = coordinates.name
+            version = coordinates.version
+            bomRef = purl
+            this.purl = purl
+        }
+        byCoordinates[coordinates] = syntheticComponent
+        extraComponents += syntheticComponent
+    }
+
+    if (extraComponents.isNotEmpty()) {
+        components = ((components ?: mutableListOf()) + extraComponents).toMutableList()
     }
 }
 
