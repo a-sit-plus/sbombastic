@@ -29,6 +29,12 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
 import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 
+private fun MavenPublication.isSbombasticCompatiblePublication(): Boolean =
+    name != "relocation" &&
+        name != "version" &&
+        name != "versions" &&
+        !artifactId.endsWith("-versionCatalog")
+
 internal val Project.enableSbombasitc: Boolean
     get() = envExtra[SBOMBASTIC_ENABLED]?.toBoolean() ?: false
 internal val Project.debugManualDependencies: Boolean
@@ -60,156 +66,148 @@ internal fun Project.sbombastic(extension: SbombasticExtension) {
     }
 
     pluginManager.withPlugin("maven-publish") {
-        afterEvaluate {
-            val publishing = extensions.findByType<PublishingExtension>() ?: return@afterEvaluate
-            val publicationSbomTasks = mutableListOf<String>()
+        val publishing = extensions.findByType<PublishingExtension>() ?: return@withPlugin
+        val aggregateTask = tasks.register("cyclonedxPublishedBom") {
+            group = LifecycleBasePlugin.VERIFICATION_GROUP
+            description = "Generates CycloneDX SBOMs for all published Maven publications in $path."
+        }
 
-            publishing.publications.withType<MavenPublication>().configureEach {
-                val publication = this
-                val publicationConfigNames = cyclonedxConfigsForPublication(publication.name)
-                if (
-                    publication.name == "relocation" ||
-                    publication.artifactId.endsWith("-versionCatalog") ||
-                    publicationConfigNames.isEmpty()
-                ) {
-                    return@configureEach
+        publishing.publications.withType<MavenPublication>().configureEach {
+            val publication = this
+            if (!publication.isSbombasticCompatiblePublication()) {
+                return@configureEach
+            }
+            val publicationConfigNames = cyclonedxConfigsForPublication(publication.name)
+            if (publicationConfigNames.isEmpty()) {
+                return@configureEach
+            }
+
+            val platform = resolvePublicationPlatform(publication.name)
+            val cyclonedxTaskName = cyclonedxTaskNameForPublication(publication.name)
+            val cyclonedxTask = tasks.register<CyclonedxDirectTask>(cyclonedxTaskName) {
+                group = LifecycleBasePlugin.VERIFICATION_GROUP
+                description = "Generates CycloneDX SBOM for Maven publication '${publication.name}'."
+                includeConfigs.set(publicationConfigNames)
+                projectType.set(Component.Type.LIBRARY)
+                schemaVersion.set(Version.VERSION_16)
+                includeMetadataResolution.set(true)
+                includeBuildSystem.set(true)
+                includeBomSerialNumber.set(true)
+                componentGroup.set(project.group.toString())
+                componentName.set(publication.artifactId)
+                componentVersion.set(project.version.toString())
+                jsonOutput.set(layout.buildDirectory.file("reports/cyclonedx-publications/${publication.name}/bom.raw.json"))
+                xmlOutput.set(layout.buildDirectory.file("reports/cyclonedx-publications/${publication.name}/bom.raw.xml"))
+
+                supplierInfo?.let {
+                    organizationalEntity.set(it.toOrganizationalEntity())
                 }
+            }
 
-                val platform = resolvePublicationPlatform(publication.name)
-                val cyclonedxTaskName = cyclonedxTaskNameForPublication(publication.name)
-                val cyclonedxTask = tasks.register<CyclonedxDirectTask>(cyclonedxTaskName) {
-                    group = LifecycleBasePlugin.VERIFICATION_GROUP
-                    description = "Generates CycloneDX SBOM for Maven publication '${publication.name}'."
-                    includeConfigs.set(publicationConfigNames)
-                    projectType.set(Component.Type.LIBRARY)
-                    schemaVersion.set(Version.VERSION_16)
-                    includeMetadataResolution.set(true)
-                    includeBuildSystem.set(true)
-                    includeBomSerialNumber.set(true)
-                    componentGroup.set(project.group.toString())
-                    componentName.set(publication.artifactId)
-                    componentVersion.set(project.version.toString())
-                    jsonOutput.set(layout.buildDirectory.file("reports/cyclonedx-publications/${publication.name}/bom.raw.json"))
-                    xmlOutput.set(layout.buildDirectory.file("reports/cyclonedx-publications/${publication.name}/bom.raw.xml"))
-
-                    supplierInfo?.let {
-                        organizationalEntity.set(it.toOrganizationalEntity())
-                    }
-                }
-
-                val normalizeTask = tasks.register<NormalizeCyclonedxBomTask>("${cyclonedxTaskName}Normalized") {
-                    group = LifecycleBasePlugin.VERIFICATION_GROUP
-                    description = "Normalizes CycloneDX package types for Maven publication '${publication.name}'."
-                    dependsOn(cyclonedxTask)
-                    dependsOn(tasks.matching {
-                        it.name == "generatePomFileFor${
-                            publication.name.replaceFirstChar { ch ->
-                                if (ch.isLowerCase()) ch.titlecase(Locale.US) else ch.toString()
-                            }
-                        }Publication"
-                    })
-                    if (platform == KotlinPlatformType.js || platform == KotlinPlatformType.wasm) {
-                        dependsOn(
-                            project.rootProject.tasks.matching {
-                                it.name.contains("packageJson", ignoreCase = true) ||
-                                        it.name.contains("rootPackageJson", ignoreCase = true) ||
-                                        it.name.contains("kotlinStoreYarnLock", ignoreCase = true) ||
-                                        it.name.contains("yarnLock", ignoreCase = true)
-                            },
-                        )
-                    }
-
-                    publicationName.set(publication.name)
-                    publicationPlatform.set(platform.name)
-                    includeConfigs.set(publicationConfigNames)
-                    inputJson.set(cyclonedxTask.flatMap { it.jsonOutput })
-                    outputJson.set(layout.buildDirectory.file("reports/cyclonedx-publications/${publication.name}/bom.json"))
-                    outputXml.set(layout.buildDirectory.file("reports/cyclonedx-publications/${publication.name}/bom.xml"))
-
-                    supplierName.set(supplierInfo?.name.orEmpty())
-                    supplierUrls.set(supplierInfo?.urls ?: emptyList())
-                    supplierContactName.set(supplierInfo?.contactName.orEmpty())
-                    supplierEmail.set(supplierInfo?.email.orEmpty())
-                    supplierMappingsUrl.set(project.supplierMappingsUrlFromEnvExtra().orEmpty())
-                    manualDependenciesJson.set(
-                        providers.provider {
-                            val collection = collectTransitiveManualDependencies(
-                                ownExtension = extension,
-                                includeConfigs = publicationConfigNames,
-                            )
-                            if (debugManualDependencies) {
-                                logger.lifecycle(
-                                    buildString {
-                                        append("  > SBOM manual dependency collection for ")
-                                        append(path)
-                                        append(':')
-                                        append(publication.name)
-                                        append(" using configs ")
-                                        append(collection.configurations.joinToString(prefix = "[", postfix = "]"))
-                                        append(" visited projects ")
-                                        append(collection.visitedProjects.joinToString(prefix = "[", postfix = "]"))
-                                        append(" collected ")
-                                        append(collection.dependencies.map { it.name }.joinToString(prefix = "[", postfix = "]"))
-                                    },
-                                )
-                            }
-                            collection.dependencies.map { it.toJson() }
+            val normalizeTask = tasks.register<NormalizeCyclonedxBomTask>("${cyclonedxTaskName}Normalized") {
+                group = LifecycleBasePlugin.VERIFICATION_GROUP
+                description = "Normalizes CycloneDX package types for Maven publication '${publication.name}'."
+                dependsOn(cyclonedxTask)
+                dependsOn(tasks.matching {
+                    it.name == "generatePomFileFor${
+                        publication.name.replaceFirstChar { ch ->
+                            if (ch.isLowerCase()) ch.titlecase(Locale.US) else ch.toString()
+                        }
+                    }Publication"
+                })
+                if (platform == KotlinPlatformType.js || platform == KotlinPlatformType.wasm) {
+                    dependsOn(
+                        project.rootProject.tasks.matching {
+                            it.name.contains("packageJson", ignoreCase = true) ||
+                                it.name.contains("rootPackageJson", ignoreCase = true) ||
+                                it.name.contains("kotlinStoreYarnLock", ignoreCase = true) ||
+                                it.name.contains("yarnLock", ignoreCase = true)
                         },
                     )
                 }
 
-                if (publication.name == "kotlinMultiplatform") {
-                    registerRootKmpSbomVariants(normalizeTask)
-                }
+                publicationName.set(publication.name)
+                publicationPlatform.set(platform.name)
+                includeConfigs.set(publicationConfigNames)
+                inputJson.set(cyclonedxTask.flatMap { it.jsonOutput })
+                outputJson.set(layout.buildDirectory.file("reports/cyclonedx-publications/${publication.name}/bom.json"))
+                outputXml.set(layout.buildDirectory.file("reports/cyclonedx-publications/${publication.name}/bom.xml"))
 
-                val verifyTask = tasks.register<VerifyCyclonedxBomConsistencyTask>("${cyclonedxTaskName}Consistency") {
+                supplierName.set(supplierInfo?.name.orEmpty())
+                supplierUrls.set(supplierInfo?.urls ?: emptyList())
+                supplierContactName.set(supplierInfo?.contactName.orEmpty())
+                supplierEmail.set(supplierInfo?.email.orEmpty())
+                supplierMappingsUrl.set(project.supplierMappingsUrlFromEnvExtra().orEmpty())
+                manualDependenciesJson.set(
+                    providers.provider {
+                        val collection = collectTransitiveManualDependencies(
+                            ownExtension = extension,
+                            includeConfigs = publicationConfigNames,
+                        )
+                        if (debugManualDependencies) {
+                            logger.lifecycle(
+                                buildString {
+                                    append("  > SBOM manual dependency collection for ")
+                                    append(path)
+                                    append(':')
+                                    append(publication.name)
+                                    append(" using configs ")
+                                    append(collection.configurations.joinToString(prefix = "[", postfix = "]"))
+                                    append(" visited projects ")
+                                    append(collection.visitedProjects.joinToString(prefix = "[", postfix = "]"))
+                                    append(" collected ")
+                                    append(collection.dependencies.map { it.name }.joinToString(prefix = "[", postfix = "]"))
+                                },
+                            )
+                        }
+                        collection.dependencies.map { it.toJson() }
+                    },
+                )
+            }
+
+            if (publication.name == "kotlinMultiplatform") {
+                registerRootKmpSbomVariants(normalizeTask)
+            }
+
+            val verifyTask = tasks.register<VerifyCyclonedxBomConsistencyTask>("${cyclonedxTaskName}Consistency") {
+                group = LifecycleBasePlugin.VERIFICATION_GROUP
+                description = "Verifies CycloneDX SBOM graph consistency for Maven publication '${publication.name}'."
+                dependsOn(normalizeTask)
+                inputJson.set(normalizeTask.flatMap { it.outputJson })
+            }
+
+            val compareTask =
+                tasks.register<VerifyCyclonedxBomDirectDependenciesTask>("${cyclonedxTaskName}DirectDependencies") {
                     group = LifecycleBasePlugin.VERIFICATION_GROUP
-                    description = "Verifies CycloneDX SBOM graph consistency for Maven publication '${publication.name}'."
+                    description =
+                        "Verifies CycloneDX SBOM direct dependencies for Maven publication '${publication.name}' against the publication POM."
                     dependsOn(normalizeTask)
+                    publicationName.set(publication.name)
                     inputJson.set(normalizeTask.flatMap { it.outputJson })
                 }
 
-                val compareTask =
-                    tasks.register<VerifyCyclonedxBomDirectDependenciesTask>("${cyclonedxTaskName}DirectDependencies") {
-                        group = LifecycleBasePlugin.VERIFICATION_GROUP
-                        description =
-                            "Verifies CycloneDX SBOM direct dependencies for Maven publication '${publication.name}' against the publication POM."
-                        dependsOn(normalizeTask)
-                        publicationName.set(publication.name)
-                        inputJson.set(normalizeTask.flatMap { it.outputJson })
-                    }
+            aggregateTask.configure {
+                dependsOn(normalizeTask)
+                dependsOn(verifyTask)
+                dependsOn(compareTask)
+            }
 
-                publicationSbomTasks += normalizeTask.name
-                publicationSbomTasks += verifyTask.name
-                publicationSbomTasks += compareTask.name
-
-                if (publication.name != "kotlinMultiplatform") {
-                    publication.artifact(normalizeTask.flatMap { it.outputJson }) {
-                        this.classifier = "cyclonedx"
-                        this.extension = "json"
-                        builtBy(normalizeTask)
-                    }
-                    publication.artifact(normalizeTask.flatMap { it.outputXml }) {
-                        classifier = "cyclonedx"
-                        this.extension = "xml"
-                        builtBy(normalizeTask)
-                    }
+            if (publication.name != "kotlinMultiplatform") {
+                publication.artifact(normalizeTask.flatMap { it.outputJson }) {
+                    this.classifier = "cyclonedx"
+                    this.extension = "json"
+                    builtBy(normalizeTask)
+                }
+                publication.artifact(normalizeTask.flatMap { it.outputXml }) {
+                    classifier = "cyclonedx"
+                    this.extension = "xml"
+                    builtBy(normalizeTask)
                 }
             }
+        }
 
-            if (publicationSbomTasks.isEmpty()) {
-                return@afterEvaluate
-            }
-
-            val aggregateTask = tasks.register("cyclonedxPublishedBom") {
-                group = LifecycleBasePlugin.VERIFICATION_GROUP
-                description = "Generates CycloneDX SBOMs for all published Maven publications in $path."
-                dependsOn(publicationSbomTasks)
-            }
-
-            tasks.withType<AbstractPublishToMaven>().configureEach {
-                dependsOn(aggregateTask)
-            }
+        tasks.withType<AbstractPublishToMaven>().configureEach {
+            dependsOn(aggregateTask)
         }
     }
 }

@@ -9,6 +9,12 @@ import org.gradle.api.publish.maven.MavenPublication
 import org.gradle.kotlin.dsl.findByType
 import org.jetbrains.kotlin.gradle.plugin.KotlinPlatformType
 
+private fun MavenPublication.isSbombasticCompatiblePublication(): Boolean =
+    name != "relocation" &&
+        name != "version" &&
+        name != "versions" &&
+        !artifactId.endsWith("-versionCatalog")
+
 internal fun packagingFromCachedPom(group: String, module: String, version: String): String? {
     val cacheRoot = File(System.getProperty("user.home"), ".gradle/caches/modules-2/files-2.1")
     val moduleDir = cacheRoot.resolve(group).resolve(module).resolve(version)
@@ -46,10 +52,11 @@ internal fun Project.packagingForCoordinates(coordinates: SbomComponentCoordinat
             ?.packaging
 
 internal fun Project.projectPublicationCoordinates(publicationName: String): PublishedCoordinates? {
+    if (publicationName == "version" || publicationName == "versions") return null
     val pomFile =
         layout.buildDirectory.file("publications/$publicationName/pom-default.xml").get().asFile.takeIf(File::exists)
             ?: return null
-    return readPomCoordinates(pomFile)
+    return readPomCoordinates(pomFile)?.takeUnless { it.coordinates.name.endsWith("-versionCatalog") }
 }
 
 internal fun Project.findPublicationCoordinates(
@@ -112,7 +119,9 @@ private fun Project.allProjectPublicationCoordinates(): Map<String, PublishedCoo
         ?.asSequence()
         ?.mapNotNull { publicationDir ->
             val pomFile = publicationDir.resolve("pom-default.xml").takeIf(File::exists) ?: return@mapNotNull null
-            publicationDir.name to readPomCoordinates(pomFile)
+            readPomCoordinates(pomFile)
+                ?.takeUnless { it.coordinates.name.endsWith("-versionCatalog") }
+                ?.let { publicationDir.name to it }
         }
         ?.toMap(linkedMapOf())
         .orEmpty()
@@ -120,7 +129,9 @@ private fun Project.allProjectPublicationCoordinates(): Map<String, PublishedCoo
 
 private fun Project.configuredPublishedCoordinates(): List<PublishedCoordinates> {
     val publishing = extensions.findByType<PublishingExtension>() ?: return emptyList()
-    return publishing.publications.withType(MavenPublication::class.java).map { publication ->
+    return publishing.publications.withType(MavenPublication::class.java)
+        .filter(MavenPublication::isSbombasticCompatiblePublication)
+        .map { publication ->
         PublishedCoordinates(
             coordinates = SbomComponentCoordinates(
                 group = publication.groupId,
@@ -135,7 +146,9 @@ private fun Project.configuredPublishedCoordinates(): List<PublishedCoordinates>
 
 private fun Project.configuredPublishedCoordinatesByName(): Map<String, PublishedCoordinates> {
     val publishing = extensions.findByType<PublishingExtension>() ?: return emptyMap()
-    return publishing.publications.withType(MavenPublication::class.java).associate { publication ->
+    return publishing.publications.withType(MavenPublication::class.java)
+        .filter(MavenPublication::isSbombasticCompatiblePublication)
+        .associate { publication ->
         publication.name to PublishedCoordinates(
             coordinates = SbomComponentCoordinates(
                 group = publication.groupId,
@@ -164,7 +177,7 @@ private fun defaultPublicationNamesForPlatform(platform: KotlinPlatformType): Li
     KotlinPlatformType.native -> listOf("native")
 }
 
-internal fun readPomCoordinates(pomFile: File): PublishedCoordinates {
+internal fun readPomCoordinates(pomFile: File): PublishedCoordinates? {
     val documentBuilderFactory = DocumentBuilderFactory.newInstance().apply {
         isNamespaceAware = true
         setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true)
@@ -202,5 +215,5 @@ internal fun readPomCoordinates(pomFile: File): PublishedCoordinates {
         coordinates = SbomComponentCoordinates(first("groupId"), first("artifactId"), first("version")),
         packaging = packaging,
         directDependencies = directDependencies(),
-    )
+    ).takeUnless { it.coordinates.name.endsWith("-versionCatalog") }
 }
